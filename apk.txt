@@ -1,0 +1,10 @@
+项目路径:D:\package_client\client
+打包jar包工作路径:D:\package_client\trunk\working
+
+1.工程的Java目录打apk是需放到工程的\Assets\Plugins\Android目录即：
+将D:\package_client\client\Java\assets 复制到D:\package_client\client\Assets\Plugins\Android\assets
+将D:\package_client\client\Java\libs 复制到D:\package_client\client\Assets\Plugins\Android\libs
+将D:\package_client\client\Java\AndroidManifest.xml 复制到D:\package_client\client\Assets\Plugins\Android\AndroidManifest.xml
+
+2.使用aapt.exe生成R.java文件
+androidSdkPath\dx.bat package -v -f -m -J D:\package_client\trunk\working\gen -S D:\package_client\client\Java\res -M D:\package_client\client\Java\AndroidManifest.xml -I androidSdkPath\android.jar

@@ -1,0 +1,151 @@
+小图纹理映射大图 大图size = (2000,2000) 小图一个像素1*1对应大图的尺寸为5*5 即小图的size = (2000 / 5,2000 / 5) = (400,400)
+
+1.新建quad组件预设,命名为fog,TransFrom Scale X = 2000 Y = 2000 为大图预设 Position X = 0 Y = 0 Z = 0
+
+2.新建fogMaterials材质
+
+3.新建PicMapping.shader
+
+Shader "xxx/xxx/PicMapping"
+{
+	Properties {
+		_Color	("MainTint",Color) = (1,1,1,1) //与大图混合的颜色
+		_ExploreColor ("MainTint",Color) = (0.1034,0.8779,0.7061,0) //探索大图闪烁颜色
+		_ClickColor ("Click",Color) = (0.236,0.7511,0.9811,0) //点击大图闪烁颜色
+		_MainTex ("Base",2D) = "white" {} //大图纹理
+		_MaskTexAlpha ("Mask",2D) = "white" {} //小图纹理
+		_NoiseTex ("Noise",2D) = "white" {} //噪声消融纹理
+		
+		_Speed ("Dissolution speed" , Range (0.0,10.0)) = 0.1
+	}
+	
+	SubShader {
+		Tags {"Queue" = "Transparent+500" "ignoreProjector" = "True" "RenderType" = "Transparent"} //设置渲染顺序,后补
+		ZTest Off
+		
+		Pass
+		{
+			Blend SrcAlpha OneMinusSrcAlpha //混合方式 源颜色 * 源透明值 + 目标颜色*（1 - 源透明值） SrcAlpha = 源透明值 OneMinusSrcAlpha = 1- 源透明值
+			CGPROGRAM
+			
+			#pragma vertex vert
+			#pragma fragment frag
+			
+			#include "UnityCG.cginc"
+			
+			fixed4 _Color;
+			fixed4 _ExploreColor;
+			fixed4 _ClickColor;
+			sampler2D _MainTex;
+			sampler2D _MaskTexAlpha;
+			sampler2D _NoiseTex;
+			float4 _MainTex_ST;
+			float _Speed;
+			
+			struct a2v {
+				float4 vertex : POSITION;
+				float4 texcoord : TEXCOORD0;
+			};
+			
+			struct v2f {
+				float4 pos : SV_POSITION;
+				float4 uv : TEXCOORD0;
+				fixed4 uvMask : TEXCOORD1;
+			};
+			
+			v2f vert (a2v v){
+				v2f o;
+				o.pos = UnityObjectToClipPos(v.vertex);
+				//TRANSFORM_TE宏 =  v.texcoord.xy * _MainTex_ST.xy + _MainTex_ST.zw; _MainTex_ST.xy中是tiling _MainTex_ST.zw中是offset
+				o.uv = TRANSFORM_TEX(v.texcoord.xy,_MainTex);
+				o.uvMask = float3(TRANSFORM_TEX(v.texcoord.xy,_MaskTexAlpha),length(ObjSpaceViewDir(v.vertex))); //当前顶点小图纹理坐标
+			};
+			
+			float4 frag (v2f i) : SV_Target {
+				fixed4 c = tex2D(_MainTex,i.uv);//获取大图纹理颜色
+				c *= _Color; //混合设定的颜色
+				float maskAlpha = tex2D(_MaskTexAlpha,i.uvMask).a;//获取小图的Alpha值
+				if(maskAlpha < 0.1 && maskAlpha > 0.0){ 
+					//maskAlpha在这个范围内 将像素的颜色设置为探索显示的颜色 闪烁动态修改Alpha值
+					c.a = _Color.a * maskAlpha * 10;
+					c.rgb = _ExploreColor.rgb;
+				}else if (maskAlpha < 0.2 && maskAlpha > 0.1){
+					//maskAlpha在这个范围内 将像素的颜色设置为点击显示的颜色 闪烁动态修改Alpha值
+					c.a = _Color.a * (maskAlpha - 0.1) * 10;
+					c.rgb = _ClickColor.rgb;
+				}else if(maskAlpha <= 0.99 && maskAlpha >= 0.9){
+					float cutout = tex2D(_NoiseTex,i.uv).r;//获取噪声纹理的r值
+					float changenum = (maskAlpha - 0.9) * 10 + 0.1;  
+					float level = changenum + _Time.x * _Speed;
+					if(cutout < level)
+						discard; //丢弃掉一些不需要渲染的像素点
+				}else{
+					c.a = _Color.a * maskAlpha; //小图的Alpha透明度设置为大图的透明度 实现开孔效果
+					c.rgb = c.rgb;
+				}
+				return c;
+			}
+			
+		}
+		ENDCG
+	}
+}
+
+4.将fogMaterials的shader设置为PicMapping.shader 并设置好Properties中对应的属性
+
+5.将fog预设的材质设置为fogMaterials
+
+6.新建FogMapping.cs脚本文件
+
+public class FogMapping : MonoBehaviour {
+
+	private static GameObject fog_go;
+	
+	private static Texture2D LodMaskAlpha = null; //小图纹理
+	
+	private static Corlor MaskClear = new Color(1f,1f,1f,0f);
+
+	private void Start(){
+		FogMapping.fog_go = base.transform.Find("fog_go").gameObject; //fog预设加载成功命名fog_go 在脚本中持有该gameObject
+	}
+
+	private static void Offset(ref int x, ref int y){
+		int num = x * FogMapping.mapSizeY + y; //获取x,y在unlockedData数组中对应的id
+		x = Mathf.FloorToInt((float)num / 8);//根据对应id计算出x,y在数组对应的byte
+		y = num % 8 ;//计算该像素在byte中偏移多少位
+	}
+	
+	public static bool HasFogAt(int x,int y){
+		FogMapping.Offset(x,y);
+		byte b = (byte)(FogMapping.unlockedData[x] >> (7 - y)); //将该位移到byte字节的末位 如0000100 >> 00000001
+		bool isHaveFog = ((int)b & 1) == 0; //& 按位与 如果两个相应的二进制位都为1，则该位的结果值为1，否则为0
+		return isHaveFog;
+	}
+	
+	public static void OpenFog(int x, int y){
+		int x2 = x;
+		int y2 = y;
+		FogMapping.Offset(x,y);
+		byte b = (byte)(1 << (7 -y));//00000001 << 0000100
+		FogMapping.unlockedData[x] = byte(FogMapping.unlockedData[x] | b); //| 按位或 两个相应的二进制位中只要有一个为1，该位的结果值为1
+		//直接设置开启 消融做法是动态这个像素的值与PicMapping.shader中对应 即设置maskAlpha <= 0.99 && maskAlpha >= 0.9
+		FogMapping.LodMaskAlpha.SetPixel(x2,y2,FogMapping.MaskClear);
+	}
+	
+	public static void InitFogMapping(int mapSizeX, int mapSizeY , byte[] unlockedData){
+		FogMapping.LodMaskAlpha = new Texture2D(mapSizeX,mapSizeY,TextureFormat.Alpha8,false); //代码动态创建只有Alpha通道的小图纹理
+		//根据unlockedData数据设置小图的Alpha值
+		for(int i = 0; i < mapSizeX; i++){
+			for(int j = 0; j < mapSizeY; j++){
+				if(FogMapping.HasFogAt(i,k)){
+					//构建查找fog点的kdtree
+				}else{
+					FogMapping.LodMaskAlpha.SetPixel(i,j,FogMapping.MaskClear);
+				}
+			}
+		}
+		FogMapping.LodMaskAlpha.Apply();//设置像素颜色生效
+		//将创建的小图纹理与PicMapping.shader中小图关联
+		FogMapping.fog_go.GetComponent<MeshRenderer>.material.SetTexture("_MaskTexAlpha",FogMapping.LodMaskAlpha)
+	}
+}

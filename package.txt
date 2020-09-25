@@ -1,0 +1,160 @@
+项目路径:D:\package_client\client
+打包jar包工作路径:D:\package_client\trunk\working
+
+
+unity安卓打包jar包
+1.定位打包jar包工作路径即D:\package_client\trunk\working,清空改目录
+2.定位Java代码目录,目录为D:\package_client\client\Java
+3.通过javac将Java目录中项目需要用到的代码编译为.class文件并输出到working文件夹 javac -encoding utf8 -d D:\package_client\trunk\working\bin -bootclasspath   -classpath D:\package_client\client\Java\lib\*  D:\package_client\client\Java\src\com\xxx\* (包含xxx目录中项目需要用到的java文件)
+4.将编译出的.class文件打包为zero.jar 命令为jar -cvfm D:\package_client\trunk\working\jar\zero.jar *
+5.通过androidSDK中的dx.bat命令将zero.jar中的.class文件转换为dex文件 androidSdkPath\dx.bat --dex --output=D:\package_client\trunk\working\dex\zero.jar D:\package_client\trunk\working\jar\zero.jar
+6.对比老包zero.jar中的classes.dex与新打出包的classes.dex文件的md5来判断改jar是否要更新
+
+通过unity.exe调用工程代码设置打包平台为android
+"C:\Program Files\Unity\Editor\Unity.exe" -projectPath "D:\package_client\client" -executeMethod CommonTool.CommandTool.setSymbolsAndPlatform -logFile "D:\noot\pyCallUnityLog\xxx.log" -batchmode -quit par-xxx (xxx是需要传到setSymbolsAndPlatform函数中的参数)
+在setSymbolsAndPlatform函数中通过以下方法获取par-xxx传过来的参数
+public static Dictionary<string,string> getParDict(){
+	Dictionary<string,string> result = new Dictionary<string,string>();
+	foreach(string arg in System.Environment.GetCommandLineArgs()){
+		if(arg.StartsWith("par-")){
+			string[] strAry = arg.Split("-");
+			result.Add(strAry[1],strAry[2]);
+		}
+	}
+	return result
+}
+
+使用MSBuild.exe命令将项目中的.csproj生成对应的dll文件
+C:\Windows\Microsoft.NET\Framework\v4.0.xxxx\MSBuild.exe D:\package_client\client\Assembly-CSharp.csproj /t:rebuild /p:Configuration=Release
+
+使用ildasm.exe反编译dll对比是否有改变
+原理:将dll反编译出的content文件进行对比,判断是否有改变
+xxx目录为Assembly-CSharp.dll存放的目录
+C:\Program Files\Microsoft SDKs\xxx\ildasm.exe xxx\Assembly-CSharp.dll \UTF8 \OUT=xxx\
+
+通过unity.exe调用工程代码打包AssetBundle
+"C:\Program Files\Unity\Editor\Unity.exe" -projectPath "D:\package_client\client" -executeMethod AssetBundleTool.BuildABHelper.buildAssetBundleAuto -logFile "D:\noot\pyCallUnityLog\xxx.log" -batchmode -quit par-xxx (xxx是需要传到buildAssetBundleAuto函数中的参数)
+buildAssetBundleAuto函数打包AssetBundle流程
+1.定义打包的AssetBundle输出目录 D:\package_client\bin\AssetBundles
+2.更新UIAtlas图集
+	a.找到当前工程的图集存放目录 D:\package_client\client\Assets\ResOriginal\UI
+	b.从buildAssetBundleAuto打包命令中获取par-xxx传过来的参数。从参数数据中获取altasCompressQuality的值。如果参数数据无altasCompressQuality的值,设置altasCompressQuality = 3
+	c.定义设置atlas质量的模板文件数组
+		public static readonly string[] ATLAS_META_TEMPLATE_ARY = new string[]{
+			"BuildConfig/Template/AtlasMetaTemplateNoneQuality.txt",
+			"BuildConfig/Template/AtlasMetaTemplateLowQuality.txt",
+			"BuildConfig/Template/AtlasMetaTemplateNormalQuality.txt",
+			"BuildConfig/Template/AtlasMetaTemplateHighQuality.txt",
+		}
+	d.根据altasCompressQuality的值从ATLAS_META_TEMPLATE_ARY数组中获取设置atlas质量的模板文件templateQuality.txt,读取该txt文件为 string atlasMetaTemplateContent
+	e.读取d中获取设置atlas质量的模板文件
+	f.遍历a中获取的图集存放目录
+		遍历当期图集目录
+			1.)从目录中读取png文件
+			2.)根据当期目录的文件夹名设置packingTag(unity会把相同的packingTag的png打包为同一图集)
+			3.)读取改png文件的.meta文件,通过getContentLineBeginWith函数读取guid,alignmet,spritePivot,spriteBorder,maxTextureSize,isReadable,filterMode这些图片属性的配置内容
+				private static string getContentLineBeginWith(string file,string content,string beginWith){
+					int startIndex = content.IndexOf(beginWith);
+					if(startIndex > -1){
+						int endIndex = content.IndexOf("\n",startIndex);
+						if(endIndex > -1){
+							return content.Substring(startIndex,endIndex - startIndex);
+						}
+					}
+					throw new System.Exception("meta文件格式不正确"+file)
+				}
+			4.)调用atlasMetaTemplateContent.Replace("#guid",guid)类似方法替换atlasMetaTemplateContent 内容中#guid,#alignmet,#spritePivot,#spriteBorder,#maxTextureSize,#isReadable,#filterMode的值
+			5.)通过atlasMetaTemplateContent为该png生成新的png.meta文件,来实现批量修改png质量的功能
+			6.)通过文件对比工具发现该功能主要修改textureCompression属性来实现图片质量修改的功能,同时设置根据png目录名为同一目录下png设置同一packingTag,将当期目录打包为同一图集
+3.将lua脚本打包为AssetBundles
+	a.找到工程lua文件的存放路径 D:\package_client\client\Assets\uLua\Lua		
+	b.遍历lua文件夹,读取每个lua文件的数据,存放在Dictionary<string byte[]> luaPathDict字典中
+		foreach(string item in Directory.GetFiles(fromFolder)){
+			FileInfo fileinfo = new FileInfo(item);
+			if(fileinfo.Extension == ".lua"){
+				int startIndex = fileinfo.FullName.IndexOf("Assets");
+				var basePath = fileinfo.FullName.Substring(startIndex);
+				basePath = basePath.ToLower();
+				basePath = basePath.Replace("\\","/");
+				startIndex = 16;
+				basePath = basePath.Substring(startIndex);
+				byte[] str = null;
+				str = File.ReadAllBytes(fileinfo.FullName);
+				if(luaPathDict.ContainKey(basePath)){
+				
+				}else{
+					luaPathDict[basePath] = str;
+				}
+			}
+		}
+		
+4.将MSBuild.exe编译出的DLL和.meta文件拷贝到Application.dataPath + "/Resources/Driver"文件夹
+  并将文件改名为Application.dataPath + "/Resources/Driver/Assembly-CSharp.bytes" 和 Application.dataPath + "/Resources/Driver/Assembly-CSharp.bytes.meta"
+  将该dll打包为ab,是为了热更c#代码,通过这种方式热更c#的代码的缺点是要在打包之前定义出需要热更的c#文件,在项目的通过特定的方式获取这些需要热更的c#文件
+  
+5.读取工程中配置文本的内容 路径为D:\package_client\client\BuildConfig\config.xml
+	<build>
+		<i targetPath = "Assets/Resources/Driver" targetExtName = ".json|.png|.prefab|.bytes"> 改配置是将Assets/Resources/Driver目录下以".json|.png|.prefab|.bytes"结尾的文件打包为ab
+		<i targetPath = "Assets/Resources/LoadingView" targetExtName = ".png|LoadingView.prefab" exportReg = "^.*$",export = "LoadingView/LoadingView.assetbundle" single = "1"/> 将Assets/Resources/LoadingView目录下".png|LoadingView.prefab"打包为单个LoadingView.assetbundle
+	</build>	
+6.根据config配置的内容整理出需要打包的文件
+	AssetBundleBuild[] buildMap = new AssetBundleBuild[buildFiles.Count];
+	for(int i = 0; i < buildFiles.Count; i++){
+		BuildABVo vo = buildFiles[i];//BuildABVo为config.xml单条配置对应的c#对象
+		string assetbundleName = vo.exportFile.Substring(outputFolder.Length + 1);
+		buildMap[i].assetbundleName = assetbundleName;
+		buildMap[i].assetNames = new string[vo.targetFiles.Count];
+		for(int j = 0; j < vo.targetFiles.Count; j++){
+			buildMap[i].assetNames[j] = FileTool.getRelativePath(vo.targetFiles[j]);
+		}
+	}
+7.调用打包ab接口
+	AssetBundleManifest result = BuildPipeline.BuildAssetBundles(outputFolder,buildMap,buildAbOption,buildTarget);
+	
+8.根据打包出的ab,将资源依赖去重复,生成依赖配置文件
+	string[] allAssetBundles = result.GetAllAssetBundles();
+	foreach(string lowerName in allAssetBundles){
+		List<string> aryList = new List<string>(result.GetAllDependencies(lowerName)) //拿出单个资源的依赖列表
+	}
+	//将依赖列表的内容去重如 A-> B,C B->C 改为A->B ,B->C
+
+9.将去重的依赖列表,生成配置文件
+	string bytesFiles = FileTool.getProjectPath("Assets/_Build_/forDepList/assetbundleDepList.bytes");
+	FileTool.createFolderForFile(bytesFiles);
+	FileStream fileStream = new FileStream(bytesFiles,FileMode.Create);
+	BinaryFormatter formatter = new BinaryFormatter();
+	formatter.Serialize(fileStream,resDict);//resDict为去重资源依赖字典
+	fileStream.Close();
+	
+10.将生成的ab文件夹拷贝到D:\package_client\client\Assets\StreamingAssets目录
+	
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		

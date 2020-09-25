@@ -1,0 +1,225 @@
+Shader "LowPoly/Water"
+{
+	Properties{
+		_DeepColor("水颜色",COLOR) = (0.18,0.32,0.44,1)
+		_NormalScale("法线强度",Range(0,4)) = 1
+		_FresnelPower("菲涅尔强度",Range(0,4)) = 2
+		_Transparent("透明度",Range(0,4)) = 0.8
+		_NormalWaveSpeed("水流速度",Vector) = (1,1,1,1)
+		_SpecPower("高光范围",Range(0.1,10)) = 5
+		_SpecIntensity("高光强度",Range(1,5)) = 1
+		
+		_DistorIntensity("反射扭曲强度",Range(0,10)) = 1
+		_ReflIntensity("反射亮度",Range(0,2)) = 1
+		
+		[Space]
+		_WaveScale("水面起伏缩放",float) = 4
+		_WaveHeightScale("水面起伏高度",Range(0,0.5)) = 0.05
+		_WaveSpeed("水面起伏速度",float) = 2
+		
+		[Space]
+		_NormalTex("法线贴图",2D) = "bump" {}
+		[NoScaleOffset]_ReflectionTex ("反射贴图"，2D) = "white" {}
+		
+		[Toggle(SOFT_EDGE)] _EnableDepthTex("柔边",float) = 0
+		_SoftRange("柔边范围",Range(0.001,5)) = 1
+		_ShallowRange("浅水区范围",Range(0.001,5)) = 2
+		_ShallowColor("浅水区颜色",COLOR) = (0.41,0.93,0.86,1)
+		
+		[Space]
+		_FoamColor("泡沫颜色",COLOR) = (0.7,0.7,0.7,1)
+		_FoamDensity("泡沫密度",Range(0,100)) = 20
+		_MaxTreshold("Max treshold",Range(0.0,1.0)) = 0.5
+		_TresholdDensity("阀值密度",Range(0.01,20)) = 5
+		_TresholdSpeed("阀值速度",Range(0.01,5.0)) = 0.5
+		_TresholdFalloff("泡沫范围",Range(0.0,1.0)) = 0.5
+		_FoamSpeed("泡沫速度",float) = 3.0
+	}
+	SubShader{
+		Tags{"Queue" = "Transparent" "RenderType"= "Transparent" "LightMode" = "ForwarBase"}
+		Cull Back ZWrite Off
+		Blend SrcAlpha OneMinusSrcAlpha
+		
+		Pass{
+			CGPROGRAM
+			#pragma vertex vert
+			#pragma fragment frag
+			#pragma shader_feature ENABLE_REFLECTIVE
+			#pragma shader_feature SOFT_EDGE
+			#pragma multi_compile __ CAMERA_DEPTH_TEXTURE
+			#pragma multi_compile_fog
+			#include "UnityCG.cginc"
+			
+			half4 _NormalWaveSpeed;
+			half4 _DeepColor;
+			sampler2D _NormalTex;
+			half4 _NormalTex_ST;
+			sampler2D _ReflectionTex;
+			half _NormalScale;
+			half _FresnelPower;
+			half _Transparent;
+			
+			#if ENABLE_REFLECTIVE
+				sampler2D _RealReflectionTex;
+				half _RealDistortIntensity;
+			#endif 
+			
+			#if SOFT_EDGE && CAMERA_DEPTH_TEXTURE 
+				sampler2D_float _LastDepthTexture;
+				half _SoftRange,_ShallowRange;
+				half4 _ShallowColor;
+			#endif
+			
+			half _SpecIntensity;
+			half _SpecPower;
+			half _ReflIntensity;
+			half _DistorIntensity;
+			
+			half _WaveScale,_WaveHeightScale._WaveSpeed
+			half _FoamDensity
+			half _FoamSpeed;
+			half _TresholdDensity;
+			half _TresholdSpeed;
+			half _MaxTreshold;
+			half _TresholdFalloff;
+			half4 _FoamColor;
+			half4 _LightColor0;
+			
+			#define TWO_PI 3.2832
+			
+			struct appdata{
+				half4 vertex:POSITION;
+				half3 normal:NORMAL;
+				half2 uv:TEXCOORD0;
+			};
+			
+			struct v2f{
+				half4 pos:SV_POTITION;
+				half4 uv:TEXCOORD0;
+				half3 viewDir : TEXCOORD1;
+				half3 normal : NORMAL;
+				half4 color : COLOR;
+				float4 projPos : TEXCOORD2;
+				half3 worldPos : TEXCOORD3;
+				UNITY_FOG_COORDS(4)
+			};
+			
+			v2f vert(appdata v){
+				v2f o = (v2f)0;
+				half4 positionWS = mul(UNITY_MATRIX_M,v.vertex);
+				half2 val = positionWS.xz * _WaveScale + _Time.y * _WaveSpeed;
+				val = fmod(val,TWO_PI);
+				half2 wave = sin(val);
+				positionWS.y += (wave.x + wave.y) * _WaveHeightScale;
+				
+				half4 positionVS = mul(UNITY_MATRIX_V,positionWS);
+				half4 positionCS = mul(UNITY_MATRIX_P,positionVS);
+				
+				o.pos = positionCS;
+				o.projPos = ComputeScreenPos(o.pos);
+				o.projPos.z = - positionVS.z;
+				
+				half2 nuv = TRANSFORM_TEX(v.uv,_NormalTex);
+				half4 waveScale = half4(nuv,nuv.x *0.4,nuv.y *0.45);
+				half4 waveOffset = _NormalWaveSpeed * _Time.y * 0.05;
+				o.uv = waveScale + frac(waveOffset);
+				o.worldPos = positionWS.xyz;
+				o.viewDir = normalize(_WorldSpaceCameraPos.xyz - positionWS.xyz);
+				UNITY_TRANSFER_FOG(o,o.pos);
+				
+				return o;
+			}
+			
+			float near(float delta, float value, float target){
+				return (delta - min(delta,abs(value - target))) / delta;
+			}
+			
+			float bin(float value){
+				return log(1 + value * 1000.0);
+			}
+			
+			float nearBin(float delta, float value ,float target){
+				return bin(near(delta,value,target));
+			}
+			
+			float positiveSin(float x){
+				x = fmod(x,TWO_PI);
+				return sin(x) * 0.5 + 0.5;
+			}
+			
+			half frag(v2f i) : SV_Target{
+				half3 bump1 = UnpackNormal(tex2D(_NormalTex,i.uv.xy)).rgb;
+				half3 bump2 = UnpackNormal(tex2D(_NormalTex,i.uv.zw)).rgb;
+				half3 normal = bump1 + bump2;
+				normal.xy *= -_NormalScale;
+				normal = normalize(normal.xyz);
+				
+				half3 viewDir = i.viewDir;
+				half fresnelFac = 1 - dot(viewDir,normal);
+				fresnelFac = saturate(pow(fresnelFac,_FresnelPower) + 0.02);
+				
+				half4 reflUV = i.projPos;
+				half3 reflection;
+				half4 color;
+				
+				#if !ENABLE_REFLECTIVE
+					reflUV.xy += normal.xy * _DistorIntensity;
+					reflection = tex2Dproj(_ReflectionTex,reflUV).rgb;
+				#else
+					reflUV.xy += normal.xy * _RealDistortIntensity;
+					reflection = tex2Dproj(_RealReflectionTex,UNITY_PROJ_COORD(reflUV)).rgb;
+				#endif
+				reflection *= _ReflIntensity;
+				
+				color.rgb = lerp(_DeepColor,reflection,fresnelFac);
+				color.a = max(_Transparent,fresnelFac);
+				
+				//specular
+				half3 lightDir = _WorldSpaceLightPos0.xyz;
+				half3 lightColor = _LightColor0.rgb;
+				half3 halfDir = normalize(lightDir + viewDir);
+				half spec = pow(saturate(dot(halfDir,normal)),_SpecPower * 256) * _SpecIntensity;
+				half3 specColor = spec * lightColor;
+				color.rgb += specColor;
+				
+				#soft
+				#if SOFT_EDGE && CAMERA_DEPTH_TEXTURE
+					half depth = SAMPLE_DEPTH_TEXTURE_PROJ(_LastDepthTexture,UNITY_PROJ_COORD(i.projPos));
+					half sceneZ = LinearEyeDepth(depth);
+					half thisZ = i.projPos.z;
+					half edge = sceneZ - thisZ;
+					
+					half fade = saturate(rcp(_SoftRange) * edge);
+					half shallow = 1 - saturate(rcp(_ShallowRange) * edge);
+					
+					float threshold = positiveSin((i.worldPos.x + _Time.y * _TresholdSpeed) * _TresholdDensity) * _MaxTreshold * (_TresholdFalloff -edge);
+					
+					float wave = positiveSin(edge * _FoamDensity - _Time.y * _FoamSpeed);
+					
+					color.rgb = lerp(color.rgb,_ShallowColor.rgb,shallow);
+					color.a *= fade;
+					
+					half w = saturate(nearBin(threshold,wave,1) + nearBin(threshold,edge,0.0)) * shallow;
+					color.rgb = lerp(color.rgb,color.rgb + _FoamColor,w);
+				#
+				UNITY_APPLY_FOG(i.fogCoord,color.rgb);
+				return half4(color)
+			}
+			ENDCG
+		}
+	}
+}	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
